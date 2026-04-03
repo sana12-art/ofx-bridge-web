@@ -3,79 +3,42 @@ import tempfile
 from pathlib import Path
 from engine import convertpdf
 
-st.set_page_config(
-    page_title="OFX Bridge Web",
-    page_icon="💳",
-    layout="wide"
-)
+st.set_page_config(page_title="OFX Bridge", layout="wide")
 
-st.title("💳 OFX Bridge - Convertisseur PDF → OFX")
-st.markdown("**Transforme tes relevés bancaires PDF en OFX pour ta compta**")
+st.title("💳 OFX Bridge")
+st.markdown("Convertisseur PDF bancaire → OFX")
 
 # Sidebar
-st.sidebar.header("📁 Fichiers PDF")
-uploaded_file = st.sidebar.file_uploader("Choisis un PDF bancaire", type="pdf")
-
-st.sidebar.header("⚙️ Logiciel comptable")
-target = st.sidebar.selectbox(
-    "Sélectionne ton logiciel", 
-    ["quadra", "sage", "ebp", "myunisoft"]
-)
-
-# Main content
-col1, col2 = st.columns([1, 3])
+st.sidebar.title("📤 Upload")
+uploaded_file = st.sidebar.file_uploader("PDF bancaire", type="pdf")
+target = st.sidebar.selectbox("Logiciel", ["quadra", "sage", "ebp"])
 
 if uploaded_file is not None:
-    col1.success(f"📄 **{uploaded_file.name}**")
+    st.success(f"Fichier: **{uploaded_file.name}**")
     
-    if st.button("🚀 Convertir en OFX", type="primary"):
-        with st.spinner("Conversion en cours..."):
-            # Sauvegarde temporaire du fichier
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                pdf_path = tmp_file.name
+    if st.button("🔄 Convertir", type="primary"):
+        with st.spinner('Conversion...'):
+            # Fichier temporaire
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                tmp.write(uploaded_file.getvalue())
+                pdf_path = tmp.name
             
             try:
-                # Conversion avec ton moteur
-                output_path, nb_txns, info, bank = convertpdf(
-                    pdf_path, target=target
-                )
+                output_path, nb_txns, info, bank = convertpdf(pdf_path, target=target)
                 
-                # Téléchargement
-                with open(output_path, "rb") as ofx_file:
+                # Download
+                with open(output_path, "rb") as f:
                     st.download_button(
-                        label=f"✅ Télécharger {Path(output_path).name}",
-                        data=ofx_file.read(),
+                        label=f"📥 {bank}.ofx ({nb_txns} txns)",
+                        data=f.read(),
                         file_name=f"releve_{bank}.ofx",
-                        mime="application/x-ofx"
+                        mime="text/plain"
                     )
-                
-                st.success(f"**{nb_txns} transactions converties**")
-                st.info(f"**Banque** : {bank}")
-                st.info(f"**IBAN** : {info.get('iban', 'Non détecté')}")
+                st.balloons()
                 
             except Exception as e:
-                st.error(f"❌ Erreur : {str(e)}")
-            
+                st.error(f"❌ {e}")
             finally:
-                # Nettoyage
                 Path(pdf_path).unlink(missing_ok=True)
-                try:
-                    Path(output_path).unlink()
-                except:
-                    pass
 else:
-    col1.info("👆 **Upload un PDF bancaire** dans la sidebar")
-    col2.markdown("""
-    # 🎯 Comment ça marche ?
-    
-    1. **Upload** ton PDF Qonto/SG/LCL/etc.
-    2. **Choisis** Quadra/Sage/etc.
-    3. **Clique Convertir**
-    4. **Télécharge** le fichier OFX !
-    
-    **Formats supportés** : Qonto, LCL, Société Générale, Crédit Agricole...
-    """)
-
-st.markdown("---")
-st.markdown("*Développé avec ❤️")
+    st.info("👈 **Upload PDF dans la sidebar**")
