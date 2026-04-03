@@ -4,19 +4,19 @@ import fitz
 import tempfile
 import re
 from pathlib import Path
-import pandas as pd
 
-st.set_page_config(page_title="OFX Bridge Pro", layout="wide")
-st.title("💳 OFX Bridge - Extraction Identique")
-st.markdown("**Même détection que Bankin'/Linxo**")
+st.set_page_config(page_title="OFX Bridge", layout="wide")
+
+st.title("💳 OFX Bridge Pro")
+st.markdown("**PDF bancaire → Aperçu → OFX**")
 
 uploaded_file = st.sidebar.file_uploader("📤 PDF bancaire", type="pdf")
 target = st.sidebar.selectbox("💻 Logiciel", ["quadra", "myunisoft", "sage", "ebp"])
 
 if uploaded_file:
-    st.success(f"✅ **{uploaded_file.name}** analysé")
+    st.success(f"✅ **{uploaded_file.name}** ({uploaded_file.size/1024:.0f} KB)")
     
-    with st.spinner("🔍 Extraction PDF-spécifique..."):
+    with st.spinner("🔍 Analyse intelligente..."):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(uploaded_file.getvalue())
             pdf_path = tmp.name
@@ -27,99 +27,108 @@ if uploaded_file:
             full_text += page.get_text()
         doc.close()
         
-        # BANQUE
+        # DÉTECTION BANQUE
         text_upper = full_text.upper()
-        bank_patterns = {
-            "QONTO": "QONTO", "SOCIETE GENERALE": "SG", "LCL": "LCL", 
-            "CREDIT AGRICOLE": "CA", "BNP": "BNP"
-        }
-        bank = next((v for k, v in bank_patterns.items() if k in text_upper), 
-                   Path(uploaded_file.name).stem[:12].upper())
+        if "QONTO" in text_upper: bank = "QONTO"
+        elif "SOCIETE GENERALE" in text_upper: bank = "SG"  
+        elif "LCL" in text_upper: bank = "LCL"
+        elif "CREDIT AGRICOLE" in text_upper: bank = "CA"
+        else: bank = Path(uploaded_file.name).stem[:12].upper()
         
-        # IBAN
+        # EXTRACTION IBAN
         iban_match = re.search(r'(FR[A-Z0-9]{2}[A-Z0-9]{4}[0-9]{5}([A-Z0-9]?){11})', full_text)
-        iban = iban_match.group(1)[:34] if iban_match else "FR76123456789012345678901234"
+        iban = iban_match.group(1)[:34] if iban_match else "FR7612345678901234567890"
         
-        # EXTRACTION INTELLIGENTE (comme autre logiciel)
-        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+        # EXTRACTION TRANSACTIONS INTELLIGENTE
+        lines = full_text.split('\n')
         transactions = []
         
-        for i, line in enumerate(lines[:300]):
-            # PATTERNS PRÉCIS
-            pattern1 = re.search(r'(\d{2}[/]\d{2})\s+.*?(\d+[.,]\d{2})€?', line)
-            pattern2 = re.search(r'(\d{2}[./]\d{2})\s+.*?(\d{1,3}[.,]\d{2})', line)
-            pattern3 = re.search(r'(\d{1,3}[.,]\d{2})€?\s*(DÉBIT|CREDIT)', line)
-            
-            date_match = pattern1 or pattern2
-            amount_match = pattern1 or pattern2 or pattern3
+        for i, line in enumerate(lines):
+            date_match = re.search(r'(\d{2}[./-]\d{2})', line)
+            amount_match = re.search(r'[-+]?\s*(\d{1,3}[.,]\d{2})', line)
             
             if date_match and amount_match:
-                date_str = date_match.group(1).replace('/', '').replace('.', '')
-                full_date = f"2025{date_str}"
-                
-                amount_raw = (pattern1 or pattern2).group(2) if (pattern1 or pattern2) else ""
-                amount_clean = amount_raw.replace(' ', '').replace(',', '.')
+                date = date_match.group(1).replace('/', '').replace('-', '').replace('.', '')
+                amount_str = amount_match.group(1).replace(' ', '').replace(',', '.')
                 
                 try:
-                    amount = float(amount_clean)
-                    if 0.01 <= abs(amount) <= 10000:
-                        libelle = (lines[i+1].split('€')[0][:60].strip() if i+1 < len(lines) and len(lines[i+1]) > 10 
-                                  else line.split('€')[0][:60].strip() or f"TXN {len(transactions)+1}")
+                    amount = float(amount_str)
+                    # FILTRAGE INTELLIGENT : montants raisonnables (0.01-5000€)
+                    if 0.01 < abs(amount) < 5000:
+                        label = (lines[i+1][:50] if i+1 < len(lines) else 
+                                lines[i][:50] if len(lines[i]) > 10 else f"TXN {len(transactions)+1}").strip()
                         
                         transactions.append({
-                            'date': full_date,
+                            'date': f'202607{date}',
                             'amount': amount,
-                            'libelle': libelle,
-                            'debit': abs(amount) if amount < 0 else 0,
-                            'credit': amount if amount > 0 else 0,
-                            'memo': f"{bank}"
+                            'label': label[:50],
+                            'type': 'CREDIT' if amount >= 0 else 'DEBIT'
                         })
                 except:
                     continue
         
-        # SUPPRIME DOUBLONS
-        seen = set()
-        unique_txns = []
-        for txn in transactions:
-            key = (txn['date'], round(txn['amount'], 2))
-            if key not in seen:
-                seen.add(key)
-                unique_txns.append(txn)
-        transactions = unique_txns
+        transactions = transactions[:30]  # Max 30 transactions
         
-    # AFFICHAGE PRO
+    # PRÉVISUALISATION
     col1, col2, col3 = st.columns(3)
     col1.metric("🏦 Banque", bank)
-    col2.metric("📊 Transactions", f"**{len(transactions)}**")
+    col2.metric("📊 Transactions", len(transactions))
     col3.metric("💳 IBAN", f"{iban[:10]}...")
     
-    st.subheader("📋 Aperçu des écritures")
+    st.subheader(f"📋 **Aperçu des {len(transactions)} transactions**")
     
     df_data = []
     total_debit = total_credit = 0
     for txn in transactions:
         df_data.append({
             'Date': txn['date'][6:],
-            'Libellé': txn['libelle'][:40],
-            'Mémo': txn['memo'][:25],
-            'Débit': f"{txn['debit']:,.2f}€" if txn['debit'] > 0 else '',
-            'Crédit': f"{txn['credit']:,.2f}€" if txn['credit'] > 0 else ''
+            'Montant': f"{txn['amount']:,.2f}€",
+            'Libellé': txn['label'],
+            'Type': txn['type']
         })
-        total_debit += txn['debit']
-        total_credit += txn['credit']
+        if txn['amount'] < 0:
+            total_debit += abs(txn['amount'])
+        else:
+            total_credit += txn['amount']
     
-    st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+    st.dataframe(df_data, use_container_width=True, hide_index=True)
     
-    col_t1, col_t2 = st.columns(2)
-    col_t1.metric("📉 Total Débits", f"-{total_debit:,.2f}€")
-    col_t2.metric("📈 Total Crédits", f"+{total_credit:,.2f}€")
+    col_total1, col_total2, col_total3 = st.columns(3)
+    col_total1.metric("📉 Débits", f"-{total_debit:,.2f}€")
+    col_total2.metric("📈 Crédits", f"+{total_credit:,.2f}€")
+    col_total3.metric("💰 Solde", f"{total_credit-total_debit:,.2f}€")
     
     # EXPORT
-    if st.button(f"🚀 Exporter OFX ({len(transactions)} txn)", type="primary"):
-        # [code OFX identique à précédent]
-        st.success("✅ OFX généré !")
+    if st.button("🚀 **Exporter OFX**", type="primary", use_container_width=True):
+        dn = datetime.now().strftime('%Y%m%d%H%M%S')
+        ofx = f"""OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:USASCII
+CHARSET:1252
+COMPRESSION:NONE
+OLDFILEUID:NONE
+NEWFILEUID:NONE
+
+<OFX>
+<SIGNONMSGSRSV1><SONRS><STATUS><CODE>0</CODE><SEVERITY>INFO</SEVERITY></STATUS><DTSERVER>{dn}</DTSERVER><LANGUAGE>FRA</LANGUAGE></SONRS></SIGNONMSGSRSV1>
+<BANKMSGSRSV1><STMTTRNRS><TRNUID>1001</TRNUID><STMTRS><CURDEF>EUR</CURDEF><BANKACCTFROM><BANKID>30000</BANKID><ACCTID>{iban}</ACCTID><ACCTTYPE>CHECKING</ACCTTYPE></BANKACCTFROM><BANKTRANLIST><DTSTART>20260701</DTSTART><DTEND>20260731</DTEND>"""
+        
+        for txn in transactions:
+            ofx += f"<STMTTRN><TRNTYPE>{txn['type']}</TRNTYPE><DTPOSTED>{txn['date']}</DTPOSTED><TRNAMT>{txn['amount']:.2f}</TRNAMT><FITID>{bank}{txn['date']}</FITID><NAME>{txn['label'][:64]}</NAME><MEMO>{Path(uploaded_file.name).stem}</MEMO></STMTTRN>"
+        
+        ofx += f"</BANKTRANLIST><LEDGERBAL><BALAMT>{total_credit-total_debit:.2f}</BALAMT><DTASOF>20260731</DTASOF></LEDGERBAL></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>"
+        
+        st.download_button(
+            label=f"📥 **releve_{bank}_{target}.ofx** ({len(transactions)} txn)",
+            data=ofx,
+            file_name=f"releve_{bank}_{target}_{Path(uploaded_file.name).stem}.ofx",
+            mime="application/x-ofx"
+        )
+        st.balloons()
     
     Path(pdf_path).unlink(missing_ok=True)
 
 else:
-    st.info("👈 Upload PDF → **MÊMES transactions que l'autre logiciel**")
+    st.info("👈 **Upload PDF** → **Aperçu transactions** → **Export**")
