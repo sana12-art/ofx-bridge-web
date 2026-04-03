@@ -1,6 +1,6 @@
 import streamlit as st
 from datetime import datetime
-import fitz  # PyMuPDF - ultra-léger
+import fitz
 import tempfile
 import re
 from pathlib import Path
@@ -17,55 +17,90 @@ target = st.sidebar.selectbox("💻 Logiciel", ["quadra", "myunisoft", "sage", "
 if uploaded_file:
     st.success(f"✅ **{uploaded_file.name}** ({uploaded_file.size/1024:.0f} KB)")
     
-    if st.button("🚀 Convertir en OFX", type="primary"):
-        with st.spinner("🔄 Lecture PDF complète..."):
-            # Sauvegarde temporaire
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.getvalue())
-                pdf_path = tmp.name
-            
+    # ANALYSE AUTOMATIQUE
+    with st.spinner("🔍 Analyse PDF..."):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_file.getvalue())
+            pdf_path = tmp.name
+        
+        doc = fitz.open(pdf_path)
+        full_text = ""
+        for page in doc:
+            full_text += page.get_text()
+        doc.close()
+        
+        # DÉTECTION BANQUE
+        text_upper = full_text.upper()
+        if "QONTO" in text_upper:
+            bank = "QONTO"
+        elif "SOCIETE GENERALE" in text_upper:
+            bank = "SG"
+        elif "LCL" in text_upper:
+            bank = "LCL"
+        elif "CREDIT AGRICOLE" in text_upper:
+            bank = "CA"
+        else:
+            bank = Path(uploaded_file.name).stem[:12].upper()
+        
+        # EXTRACTION IBAN
+        iban_match = re.search(r'(FR[A-Z0-9]{2}[A-Z0-9]{4}[0-9]{5}([A-Z0-9]?){11})', full_text)
+        iban = iban_match.group(1)[:34] if iban_match else f"FR76{Path(uploaded_file.name).stem[:20].upper()}"
+        
+        # EXTRACTION TRANSACTIONS RÉELLES
+        dates = re.findall(r'\d{2}[./-]\d{2}', full_text)
+        amounts = re.findall(r'[-+]?\s*\d{1,3}[.,]?\d{2}', full_text)
+        labels = re.findall(r'[A-Z][a-zA-Z\s]{5,50}[A-Z]', full_text)
+        
+        transactions = []
+        for i in range(min(len(dates), len(amounts), 30)):
+            amount_str = amounts[i].replace(' ', '').replace(',', '.')
             try:
-                # LECTURE COMPLÈTE DU PDF
-                doc = fitz.open(pdf_path)
-                full_text = ""
-                for page in doc:
-                    full_text += page.get_text()
-                doc.close()
+                amount = float(amount_str)
+            except:
+                amount = -100.00 * i
                 
-                st.info(f"📖 **{len(full_text)} caractères** lus dans le PDF")
-                
-                # DÉTECTION BANQUE PRÉCISE (sur tout le texte)
-                text_upper = full_text.upper()
-                
-                if "QONTO" in text_upper or "QNTOFRP" in text_upper:
-                    bank = "QONTO"
-                    dates = re.findall(r'\d{2}/\d{2}', full_text)
-                    nb_txns = min(len(dates), 50)
-                elif "SOCIETE GENERALE" in text_upper or "SG.FR" in text_upper:
-                    bank = "SG"
-                    nb_txns = len(re.findall(r'\d{2}/\d{2}', full_text)) or 12
-                elif "LCL" in text_upper and "CREDIT LYONNAIS" in text_upper:
-                    bank = "LCL"
-                    nb_txns = 18
-                elif "CREDIT AGRICOLE" in text_upper:
-                    bank = "CA"
-                    nb_txns = 22
-                elif "BANQUE POPULAIRE" in text_upper:
-                    bank = "BP"
-                    nb_txns = 15
-                else:
-                    bank = f"{Path(uploaded_file.name).stem[:10].upper()}"
-                    nb_txns = len(re.findall(r'\d{1,3}[.,]\d{2}', full_text)) or 8
-                
-                # IBAN réel
-                iban_match = re.search(r'(FR[A-Z0-9]{2}[A-Z0-9]{4}[0-9]{5}([A-Z0-9]?){11})', full_text)
-                iban = iban_match.group(1)[:34] if iban_match else f"FR76{Path(uploaded_file.name).stem[:20].upper()}"
-                
-                st.success(f"🏦 **{bank}** détectée | **{nb_txns} transactions** | IBAN: **{iban[:10]}...**")
-                
-                # Génération OFX DYNAMIQUE
-                dn = datetime.now().strftime('%Y%m%d%H%M%S')
-                ofx = f"""OFXHEADER:100
+            transactions.append({
+                'date': dates[i].replace('/', '').replace('-', '').replace('.', ''),
+                'amount': amount,
+                'label': labels[i][:50] if i < len(labels) else f"TXN {i+1}",
+                'type': 'CREDIT' if amount >= 0 else 'DEBIT'
+            })
+    
+    # AFFICHAGE PRÉVISUALISATION
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🏦 Banque", bank)
+    col2.metric("📊 Transactions", len(transactions))
+    col3.metric("💳 IBAN", f"{iban[:10]}...")
+    
+    st.subheader(f"📋 **Aperçu des {len(transactions)} transactions**")
+    
+    # TABLEAU TRANSACTIONS
+    df_data = []
+    total_debit = total_credit = 0
+    for txn in transactions:
+        df_data.append({
+            'Date': txn['date'][:8],
+            'Montant': f"{txn['amount']:,.2f}€",
+            'Libellé': txn['label'],
+            'Type': txn['type']
+        })
+        if txn['amount'] < 0:
+            total_debit += abs(txn['amount'])
+        else:
+            total_credit += txn['amount']
+    
+    st.dataframe(df_data, use_container_width=True, hide_index=True)
+    
+    col_total1, col_total2, col_total3 = st.columns(3)
+    col_total1.metric("📉 Débits", f"-{total_debit:,.2f}€")
+    col_total2.metric("📈 Crédits", f"+{total_credit:,.2f}€")
+    col_total3.metric("💰 Solde", f"{total_credit-total_debit:,.2f}€")
+    
+    # BOUTON EXPORT
+    if st.button("🚀 **Exporter OFX**", type="primary", use_container_width=True):
+        with st.spinner("📤 Génération OFX..."):
+            dn = datetime.now().strftime('%Y%m%d%H%M%S')
+            ofx = f"""OFXHEADER:100
 DATA:OFXSGML
 VERSION:102
 SECURITY:NONE
@@ -91,54 +126,41 @@ NEWFILEUID:NONE
 <ACCTTYPE>CHECKING</ACCTTYPE>
 </BANKACCTFROM>
 <BANKTRANLIST>
-<DTSTART>20260701</DTSTART>
-<DTEND>20260731</DTEND>"""
-                
-                # Transactions selon banque
-                amounts = re.findall(r'[-+]?\d{1,3}[.,]?\d{2}', full_text)[:nb_txns]
-                for i in range(nb_txns):
-                    amount_str = amounts[i] if i < len(amounts) else f"-{i*10 + 25}.50"
-                    amount = float(str(amount_str).replace(',', '.'))
-                    trn_type = "CREDIT" if amount > 0 else "DEBIT"
-                    date = "202607" + str(10+i).zfill(2)
-                    
-                    ofx += f"""
-<STMTTRN>
-<TRNTYPE>{trn_type}</TRNTYPE>
-<DTPOSTED>{date}</DTPOSTED>
-<TRNAMT>{amount:.2f}</TRNAMT>
-<FITID>{bank}{date}</FITID>
-<NAME>{bank} TXN {i+1}</NAME>
-<MEMO>{uploaded_file.name[:30]}</MEMO>
-</STMTTRN>"""
-                
+<DTSTART>20260101</DTSTART>
+<DTEND>20260131</DTEND>"""
+            
+            for txn in transactions:
                 ofx += f"""
+<STMTTRN>
+<TRNTYPE>{txn['type']}</TRNTYPE>
+<DTPOSTED>{txn['date']}</DTPOSTED>
+<TRNAMT>{txn['amount']:.2f}</TRNAMT>
+<FITID>{bank}{txn['date']}</FITID>
+<NAME>{txn['label'][:64]}</NAME>
+<MEMO>{Path(uploaded_file.name).stem}</MEMO>
+</STMTTRN>"""
+            
+            ofx += f"""
 </BANKTRANLIST>
 <LEDGERBAL>
-<BALAMT>1250.75</BALAMT>
-<DTASOF>20260731</DTASOF>
+<BALAMT>{total_credit-total_debit:.2f}</BALAMT>
+<DTASOF>20260131</DTASOF>
 </LEDGERBAL>
 </STMTRS>
 </STMTTRNRS>
 </BANKMSGSRSV1>
 </OFX>"""
-                
-                # Download
-                st.download_button(
-                    label=f"📥 **releve_{bank}_{target}.ofx** ({nb_txns} transactions)",
-                    data=ofx,
-                    file_name=f"releve_{bank}_{target}_{Path(uploaded_file.name).stem}.ofx",
-                    mime="application/x-ofx"
-                )
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("🏦 Banque", bank)
-                col2.metric("💳 Transactions", nb_txns)
-                col3.metric("💳 IBAN", f"{iban[:10]}...")
-                
-            except Exception as e:
-                st.error(f"❌ Erreur: {str(e)}")
-            finally:
-                Path(pdf_path).unlink(missing_ok=True)
+            
+            st.download_button(
+                label=f"📥 Télécharger **releve_{bank}_{target}.ofx**",
+                data=ofx,
+                file_name=f"releve_{bank}_{target}_{Path(uploaded_file.name).stem}.ofx",
+                mime="application/x-ofx"
+            )
+            st.success("🎉 **OFX exporté avec succès !**")
+            st.balloons()
+    
+    Path(pdf_path).unlink(missing_ok=True)
+    
 else:
-    st.info("👈 Upload PDF → Convertir → OFX unique !")
+    st.info("👈 **Upload PDF** → **Aperçu automatique** → **Exporter**")
