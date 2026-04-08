@@ -17,7 +17,7 @@ target = st.sidebar.selectbox("💻 Logiciel", ["quadra", "myunisoft", "sage", "
 def parse_amount_fr(value):
     if not value:
         return None
-    s = value.replace("€", "").replace("\u202f", "").replace(" ", "").strip()
+    s = str(value).replace("€", "").replace("\u202f", "").replace(" ", "").strip()
     s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
@@ -26,6 +26,46 @@ def parse_amount_fr(value):
 
 def clean_text(value):
     return re.sub(r"\s+", " ", value or "").strip()
+
+def is_skip_line(line):
+    u = line.upper()
+    skip_keywords = [
+        "TOTAL DES MOUVEMENTS",
+        "SOLDE CREDITEUR",
+        "SOLDE DÉBITEUR",
+        "SOLDE DEBITEUR",
+        "IBAN",
+        "RELEVE ET INFORMATIONS BANCAIRES",
+        "RELEVÉ ET INFORMATIONS BANCAIRES",
+        "CREDIT INDUSTRIEL ET COMMERCIAL",
+        "CIC EZANVILLE",
+        "PAGE",
+        "WWW.CIC.FR",
+        "RCS PARIS",
+        "TVA INTRACOMMUNAUTAIRE",
+        "MÉDIATEUR",
+        "MEDIATEUR",
+        "GARANTIE",
+        "ORIAS",
+        "DATE DATE VALEUR OPERATION DEBIT EUROS CREDIT EUROS",
+        "DATE DATE VALEUR OPÉRATION DÉBIT EUROS CRÉDIT EUROS"
+    ]
+    return any(k in u for k in skip_keywords)
+
+def detect_bank(text_upper, filename):
+    if "CREDIT INDUSTRIEL ET COMMERCIAL" in text_upper or "CMCIFRPP" in text_upper or "CIC" in text_upper:
+        return "CIC"
+    if "QONTO" in text_upper:
+        return "QONTO"
+    if "SOCIETE GENERALE" in text_upper or "SOCIÉTÉ GÉNÉRALE" in text_upper:
+        return "SG"
+    if "LCL" in text_upper:
+        return "LCL"
+    if "CREDIT AGRICOLE" in text_upper or "CRÉDIT AGRICOLE" in text_upper:
+        return "CA"
+    if "BANQUE POSTALE" in text_upper:
+        return "LBP"
+    return Path(filename).stem[:12].upper()
 
 if uploaded_file:
     st.success(f"✅ **{uploaded_file.name}** ({uploaded_file.size/1024:.0f} KB)")
@@ -42,101 +82,96 @@ if uploaded_file:
         doc.close()
 
         text_upper = full_text.upper()
+        bank = detect_bank(text_upper, uploaded_file.name)
 
-        if "QONTO" in text_upper:
-            bank = "QONTO"
-        elif "SOCIETE GENERALE" in text_upper or "SOCIÉTÉ GÉNÉRALE" in text_upper:
-            bank = "SG"
-        elif "LCL" in text_upper:
-            bank = "LCL"
-        elif "CREDIT AGRICOLE" in text_upper or "CRÉDIT AGRICOLE" in text_upper:
-            bank = "CA"
-        elif "CREDIT INDUSTRIEL ET COMMERCIAL" in text_upper or "CMCIFRPP" in text_upper or "CIC" in text_upper:
-            bank = "CIC"
-        elif "BANQUE POSTALE" in text_upper:
-            bank = "LBP"
-        else:
-            bank = Path(uploaded_file.name).stem[:12].upper()
-
-        iban_match = re.search(r'(FR[A-Z0-9]{2}[A-Z0-9]{4}[0-9]{5}[A-Z0-9]{11,})', text_upper)
+        iban_match = re.search(r'(FR[A-Z0-9]{2}[A-Z0-9]{4}[A-Z0-9]{11,})', text_upper)
         iban = iban_match.group(1) if iban_match else f"FR76{Path(uploaded_file.name).stem[:20].upper()}"
 
-        lines = [line.strip() for line in full_text.split("\n") if line.strip()]
+        lines = [clean_text(line) for line in full_text.split("\n") if clean_text(line)]
         transactions = []
 
-        skip_keywords = [
-            "TOTAL DES MOUVEMENTS",
-            "SOLDE CREDITEUR",
-            "SOLDE DÉBITEUR",
-            "SOLDE DEBITEUR",
-            "IBAN",
-            "RELEVE ET INFORMATIONS BANCAIRES",
-            "RELEVÉ ET INFORMATIONS BANCAIRES",
-            "CREDIT INDUSTRIEL ET COMMERCIAL",
-            "CIC EZANVILLE",
-            "PAGE",
-            "WWW.CIC.FR",
-            "RCS PARIS",
-            "TVA INTRACOMMUNAUTAIRE",
-            "MÉDIATEUR",
-            "MEDIATEUR",
-            "GARANTIE",
-            "ORIAS",
-            "DATE DATE VALEUR OPERATION DEBIT EUROS CREDIT EUROS",
-            "DATE DATE VALEUR OPÉRATION DÉBIT EUROS CRÉDIT EUROS"
-        ]
+        # Extraction robuste CIC : une ligne = une écriture quand elle contient une date
+        # On accepte plusieurs variantes :
+        # - 01/07/2025 01/07/2025 LIBELLE 132,73
+        # - 01/07/2025 LIBELLE 132,73
+        # - date + libellé + montant sur ligne suivante si besoin
+        date_regex = re.compile(r'^(\d{2}/\d{2}/\d{4})\s+(.*)$')
 
-        for i, line in enumerate(lines):
-            up = line.upper()
-
-            if any(k in up for k in skip_keywords):
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if is_skip_line(line):
+                i += 1
                 continue
 
-            m = re.match(
-                r"^(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+(.*?)(\d[\d\s.,]*)$",
-                line
-            )
+            m = date_regex.match(line)
             if not m:
+                i += 1
                 continue
 
             date_op = m.group(1)
-            date_val = m.group(2)
-            rest = clean_text(m.group(3))
-            amount_raw = m.group(4).strip()
-            amount = parse_amount_fr(amount_raw)
+            rest = m.group(2).strip()
 
-            if amount is None:
-                continue
+            # Cas CIC fréquent : date valeur répétée au début
+            rest = re.sub(r'^\d{2}/\d{2}/\d{4}\s+', '', rest).strip()
 
-            if abs(amount) < 0.01 or abs(amount) > 1000000:
-                continue
-
-            label = rest[:80]
-
+            # On cherche un montant à la fin de la ligne
+            amount = None
+            label = rest
             memo = ""
-            if i + 1 < len(lines):
-                next_line = clean_text(lines[i + 1])
-                if next_line and not re.match(r"^\d{2}/\d{2}/\d{4}", next_line):
-                    if not any(k in next_line.upper() for k in skip_keywords):
+
+            amt_match = re.search(r'(-?\d[\d\s.,]*\d)$', rest)
+            if amt_match:
+                amount = parse_amount_fr(amt_match.group(1))
+                label = rest[:amt_match.start()].strip()
+
+            # Si pas trouvé sur la même ligne, regarder la ligne suivante
+            if amount is None and i + 1 < len(lines):
+                next_line = lines[i + 1]
+                if not is_skip_line(next_line):
+                    next_amt = re.search(r'(-?\d[\d\s.,]*\d)$', next_line)
+                    if next_amt:
+                        amount = parse_amount_fr(next_amt.group(1))
+                        memo = next_line[:next_amt.start()].strip()
+
+            # Si toujours rien, essayer sur 2 lignes suivantes
+            if amount is None and i + 2 < len(lines):
+                next_line = lines[i + 1]
+                next_next_line = lines[i + 2]
+                if not is_skip_line(next_line):
+                    next_amt = re.search(r'(-?\d[\d\s.,]*\d)$', next_next_line)
+                    if next_amt:
+                        amount = parse_amount_fr(next_amt.group(1))
                         memo = next_line[:120]
+                        if not label:
+                            label = next_line[:80]
 
-            label_upper = label.upper()
-            if any(x in label_upper for x in ["PAIEMENT", "PRLV", "PRELEVEMENT", "FACT"]):
-                signed_amount = -abs(amount)
-                txn_type = "DEBIT"
-            else:
-                signed_amount = amount if amount >= 0 else abs(amount)
-                txn_type = "CREDIT" if signed_amount >= 0 else "DEBIT"
+            if amount is not None:
+                label = clean_text(label)
+                memo = clean_text(memo)
 
-            transactions.append({
-                "date": date_op.replace("/", ""),
-                "date_value": date_val.replace("/", ""),
-                "amount": signed_amount,
-                "label": label,
-                "memo": memo,
-                "type": txn_type
-            })
+                if not label:
+                    label = f"Transaction {len(transactions) + 1}"
 
+                # Heuristique simple : certains relevés CIC utilisent des montants positifs
+                # On garde le signe tel quel s'il existe, sinon on classe selon le libellé.
+                if amount > 0 and any(x in label.upper() for x in ["PAIEMENT", "PRLV", "PRELEVEMENT", "FACT"]):
+                    amount = -abs(amount)
+
+                txn_type = "DEBIT" if amount < 0 else "CREDIT"
+
+                transactions.append({
+                    "date": date_op.replace("/", ""),
+                    "date_display": date_op,
+                    "amount": amount,
+                    "label": label[:80],
+                    "memo": memo[:120],
+                    "type": txn_type
+                })
+
+            i += 1
+
+        # Suppression des doublons
         unique = []
         seen = set()
         for t in transactions:
@@ -158,31 +193,32 @@ if uploaded_file:
     total_credit = 0.0
 
     for txn in transactions:
-        debit = abs(txn["amount"]) if txn["amount"] < 0 else 0
-        credit = txn["amount"] if txn["amount"] > 0 else 0
+        debit = abs(txn["amount"]) if txn["amount"] < 0 else 0.0
+        credit = txn["amount"] if txn["amount"] > 0 else 0.0
 
         df_data.append({
-            "Date": txn["date"][:8],
+            "Date": txn["date_display"],
             "Libellé": txn["label"],
             "Mémo": txn["memo"],
-            "Débit": f"{debit:,.2f}€" if debit else "",
-            "Crédit": f"{credit:,.2f}€" if credit else ""
+            "Débit": f"{debit:,.2f}€".replace(",", " ").replace(".", ",") if debit else "",
+            "Crédit": f"{credit:,.2f}€".replace(",", " ").replace(".", ",") if credit else ""
         })
 
         total_debit += debit
         total_credit += credit
 
-    df = pd.DataFrame(df_data)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
 
     col_total1, col_total2, col_total3 = st.columns(3)
-    col_total1.metric("📉 Débits", f"{total_debit:,.2f}€")
-    col_total2.metric("📈 Crédits", f"{total_credit:,.2f}€")
-    col_total3.metric("💰 Solde", f"{total_credit - total_debit:,.2f}€")
+    col_total1.metric("📉 Débits", f"{total_debit:,.2f}€".replace(",", " ").replace(".", ","))
+    col_total2.metric("📈 Crédits", f"{total_credit:,.2f}€".replace(",", " ").replace(".", ","))
+    col_total3.metric("💰 Solde", f"{(total_credit - total_debit):,.2f}€".replace(",", " ").replace(".", ","))
 
     if st.button("🚀 **Exporter OFX**", type="primary", use_container_width=True):
         with st.spinner("📤 Génération OFX..."):
             dn = datetime.now().strftime("%Y%m%d%H%M%S")
+            dtstart = "20250701"
+            dtend = "20250731"
 
             ofx = f"""OFXHEADER:100
 DATA:OFXSGML
@@ -210,8 +246,8 @@ NEWFILEUID:NONE
 <ACCTTYPE>CHECKING</ACCTTYPE>
 </BANKACCTFROM>
 <BANKTRANLIST>
-<DTSTART>20250701</DTSTART>
-<DTEND>20250731</DTEND>"""
+<DTSTART>{dtstart}</DTSTART>
+<DTEND>{dtend}</DTEND>"""
 
             for txn in transactions:
                 ofx += f"""
@@ -221,14 +257,14 @@ NEWFILEUID:NONE
 <TRNAMT>{txn["amount"]:.2f}</TRNAMT>
 <FITID>{bank}{txn["date"]}{abs(txn["amount"]):.2f}</FITID>
 <NAME>{txn["label"][:64]}</NAME>
-<MEMO>{txn["memo"][:128] if txn["memo"] else Path(uploaded_file.name).stem}</MEMO>
+<MEMO>{(txn["memo"] if txn["memo"] else Path(uploaded_file.name).stem)[:128]}</MEMO>
 </STMTTRN>"""
 
             ofx += f"""
 </BANKTRANLIST>
 <LEDGERBAL>
-<BALAMT>{total_credit - total_debit:.2f}</BALAMT>
-<DTASOF>20250731</DTASOF>
+<BALAMT>{(total_credit - total_debit):.2f}</BALAMT>
+<DTASOF>{dtend}</DTASOF>
 </LEDGERBAL>
 </STMTRS>
 </STMTTRNRS>
