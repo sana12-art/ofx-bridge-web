@@ -28,34 +28,35 @@ if uploaded_file:
 
         st.subheader(f"📋 Aperçu des {len(transactions)} transactions")
 
-        df_data = []
-        total_debit = 0.0
-        total_credit = 0.0
+        if transactions:
+            df_data = []
+            total_debit = 0.0
+            total_credit = 0.0
 
-        for txn in transactions:
-            debit = abs(txn["amount"]) if txn["amount"] < 0 else 0.0
-            credit = txn["amount"] if txn["amount"] > 0 else 0.0
+            for txn in transactions:
+                debit = abs(txn["amount"]) if txn["amount"] < 0 else 0.0
+                credit = txn["amount"] if txn["amount"] > 0 else 0.0
 
-            df_data.append({
-                "Date": txn["date"],
-                "Libellé": txn["name"],
-                "Mémo": txn["memo"],
-                "Débit": f"{debit:,.2f}€".replace(",", " ").replace(".", ",") if debit else "",
-                "Crédit": f"{credit:,.2f}€".replace(",", " ").replace(".", ",") if credit else ""
-            })
+                df_data.append({
+                    "Date": txn["date"],
+                    "Libellé": txn["name"],
+                    "Mémo": txn["memo"],
+                    "Débit": f"{debit:,.2f}€".replace(",", " ").replace(".", ",") if debit else "",
+                    "Crédit": f"{credit:,.2f}€".replace(",", " ").replace(".", ",") if credit else ""
+                })
 
-            total_debit += debit
-            total_credit += credit
+                total_debit += debit
+                total_credit += credit
 
-        if df_data:
             st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("📉 Débits", f"{total_debit:,.2f}€".replace(",", " ").replace(".", ","))
+            c2.metric("📈 Crédits", f"{total_credit:,.2f}€".replace(",", " ").replace(".", ","))
+            c3.metric("💰 Solde", f"{(total_credit - total_debit):,.2f}€".replace(",", " ").replace(".", ","))
+
         else:
             st.warning("Aucune transaction détectée dans ce PDF.")
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("📉 Débits", f"{total_debit:,.2f}€".replace(",", " ").replace(".", ","))
-        c2.metric("📈 Crédits", f"{total_credit:,.2f}€".replace(",", " ").replace(".", ","))
-        c3.metric("💰 Solde", f"{(total_credit - total_debit):,.2f}€".replace(",", " ").replace(".", ","))
 
         if st.button("🚀 Exporter OFX", type="primary", use_container_width=True):
             ofx_path, count, info_out, bank = convertpdf(pdf_path, None, target)
@@ -73,6 +74,5 @@ if uploaded_file:
 
     finally:
         Path(pdf_path).unlink(missing_ok=True)
-
 else:
     st.info("👈 Upload PDF → Aperçu automatique → Exporter")

@@ -4,7 +4,6 @@ from datetime import datetime
 import re
 import hashlib
 
-
 def parse_amount_fr(s):
     if not s:
         return None
@@ -15,10 +14,8 @@ def parse_amount_fr(s):
     except:
         return None
 
-
 def clean_text(s):
     return re.sub(r"\s+", " ", s or "").strip()
-
 
 def detect_bank(pages_text):
     text = "\n".join(pages_text[:3]).upper()
@@ -38,15 +35,6 @@ def detect_bank(pages_text):
         return "LBP"
     return "UNKNOWN"
 
-
-def extract_words_by_page(pdfpath):
-    pages = []
-    with pdfplumber.open(pdfpath) as pdf:
-        for page in pdf.pages:
-            pages.append(page.extract_words(keep_blank_chars=False))
-    return pages
-
-
 def extract_text_by_page(pdfpath):
     pages = []
     with pdfplumber.open(pdfpath) as pdf:
@@ -54,10 +42,8 @@ def extract_text_by_page(pdfpath):
             pages.append(page.extract_text() or "")
     return pages
 
-
 def make_fitid(date, label, amount):
     return hashlib.md5(f"{date}{label}{amount:.2f}".encode()).hexdigest()
-
 
 def generate_ofx(info, txns, target):
     dn = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -114,9 +100,7 @@ def generate_ofx(info, txns, target):
         f"<DTASOF>{dn[:8]}</DTASOF></LEDGERBAL>",
         "</STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>",
     ])
-
     return "\n".join(lines)
-
 
 def parse_cic(pdfpath):
     lines = []
@@ -126,22 +110,10 @@ def parse_cic(pdfpath):
             lines.extend([clean_text(x) for x in txt.split("\n") if clean_text(x)])
 
     skip_keywords = [
-        "TOTAL DES MOUVEMENTS",
-        "SOLDE CREDITEUR",
-        "SOLDE DEBITEUR",
-        "IBAN",
-        "RELEVE ET INFORMATIONS BANCAIRES",
-        "RELEVÉ ET INFORMATIONS BANCAIRES",
-        "CREDIT INDUSTRIEL ET COMMERCIAL",
-        "CIC EZANVILLE",
-        "PAGE",
-        "WWW.CIC.FR",
-        "RCS PARIS",
-        "TVA INTRACOMMUNAUTAIRE",
-        "MÉDIATEUR",
-        "MEDIATEUR",
-        "GARANTIE",
-        "ORIAS",
+        "TOTAL DES MOUVEMENTS", "SOLDE CREDITEUR", "SOLDE DEBITEUR", "IBAN",
+        "RELEVE ET INFORMATIONS BANCAIRES", "RELEVÉ ET INFORMATIONS BANCAIRES",
+        "CREDIT INDUSTRIEL ET COMMERCIAL", "CIC EZANVILLE", "PAGE", "WWW.CIC.FR",
+        "RCS PARIS", "TVA INTRACOMMUNAUTAIRE", "MÉDIATEUR", "MEDIATEUR", "GARANTIE", "ORIAS",
     ]
 
     transactions = []
@@ -209,7 +181,6 @@ def parse_cic(pdfpath):
         "balance_close": sum(t["amount"] for t in uniq),
     }
     return info, uniq
-
 
 def convertpdf(pdfpath, outputpath=None, target="quadra"):
     p = Path(pdfpath)
