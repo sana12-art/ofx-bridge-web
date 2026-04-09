@@ -4,6 +4,7 @@ from datetime import datetime
 import re
 import hashlib
 
+
 def parse_amount_fr(s):
     if not s:
         return None
@@ -14,8 +15,10 @@ def parse_amount_fr(s):
     except:
         return None
 
+
 def clean_text(s):
     return re.sub(r"\s+", " ", s or "").strip()
+
 
 def detect_bank(pages_text):
     text = "\n".join(pages_text[:3]).upper()
@@ -35,6 +38,7 @@ def detect_bank(pages_text):
         return "LBP"
     return "UNKNOWN"
 
+
 def extract_text_by_page(pdfpath):
     pages = []
     with pdfplumber.open(pdfpath) as pdf:
@@ -42,8 +46,10 @@ def extract_text_by_page(pdfpath):
             pages.append(page.extract_text() or "")
     return pages
 
+
 def make_fitid(date, label, amount):
     return hashlib.md5(f"{date}{label}{amount:.2f}".encode()).hexdigest()
+
 
 def generate_ofx(info, txns, target):
     dn = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -102,18 +108,22 @@ def generate_ofx(info, txns, target):
     ])
     return "\n".join(lines)
 
+
 def parse_cic(pdfpath):
+    """Parseur CIC robuste - ne prend QUE les vrais montants"""
     lines = []
     with pdfplumber.open(pdfpath) as pdf:
         for page in pdf.pages:
             txt = page.extract_text() or ""
             lines.extend([clean_text(x) for x in txt.split("\n") if clean_text(x)])
 
+    # Skip mots-clés techniques
     skip_keywords = [
         "TOTAL DES MOUVEMENTS", "SOLDE CREDITEUR", "SOLDE DEBITEUR", "IBAN",
         "RELEVE ET INFORMATIONS BANCAIRES", "RELEVÉ ET INFORMATIONS BANCAIRES",
         "CREDIT INDUSTRIEL ET COMMERCIAL", "CIC EZANVILLE", "PAGE", "WWW.CIC.FR",
-        "RCS PARIS", "TVA INTRACOMMUNAUTAIRE", "MÉDIATEUR", "MEDIATEUR", "GARANTIE", "ORIAS",
+        "RCS PARIS", "TVA INTRACOMMUNAUTAIRE", "MÉDIATEUR", "MEDIATEUR", 
+        "GARANTIE", "ORIAS", "DATE", "VALEUR", "OPÉRATION", "DÉBIT", "CRÉDIT"
     ]
 
     transactions = []
@@ -122,37 +132,50 @@ def parse_cic(pdfpath):
         line = lines[i]
         up = line.upper()
 
+        # Skip lignes techniques
         if any(k in up for k in skip_keywords):
             i += 1
             continue
 
-        m = re.match(r"^(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})\s+(.*)$", line)
-        if not m:
+        # Date au début = transaction potentielle (plus souple)
+        date_match = re.match(r"^(\d{2}/\d{2}/\d{4})", line)
+        if not date_match:
             i += 1
             continue
 
-        date_op = m.group(1)
-        rest = clean_text(m.group(3))
+        date_op = date_match.group(1)
+        rest = clean_text(line[len(date_match.group(1)):].strip())
 
-        amt_match = re.search(r"(-?\d[\d\s.,]*\d)$", rest)
+        # ✅ REGEX STRICTE : SEULEMENT montants "1 234,56" ou "123,45"
+        amt_match = re.search(r'(\d{1,3}(?:\s?\d{3})*(?:,\d{2})?)$', rest)
         amount = None
         label = rest
 
         if amt_match:
-            amount = parse_amount_fr(amt_match.group(1))
-            label = clean_text(rest[:amt_match.start()])
+            candidate = amt_match.group(1).replace(" ", "").replace(",", ".")
+            amount = parse_amount_fr(candidate)
+            
+            # ❌ Rejette les numéros de compte géants (> 1M€)
+            if amount and abs(amount) > 1000000:
+                amount = None
+            else:
+                label = clean_text(rest[:amt_match.start()])
 
-        memo = ""
+        # Si pas de montant sur la ligne date, vérifier ligne suivante
         if amount is None and i + 1 < len(lines):
             next_line = lines[i + 1]
             if not any(k in next_line.upper() for k in skip_keywords):
-                next_amt = re.search(r"(-?\d[\d\s.,]*\d)$", next_line)
+                next_amt = re.search(r'(\d{1,3}(?:\s?\d{3})*(?:,\d{2})?)$', next_line)
                 if next_amt:
-                    amount = parse_amount_fr(next_amt.group(1))
-                    memo = clean_text(next_line[:next_amt.start()])
+                    candidate = next_amt.group(1).replace(" ", "").replace(",", ".")
+                    amount = parse_amount_fr(candidate)
+                    if amount and abs(amount) <= 1000000:
+                        label = clean_text(line[len(date_match.group(1)):])
 
-        if amount is not None:
-            if amount > 0 and any(x in up for x in ["PAIEMENT", "PRLV", "PRELEVEMENT", "FACT"]):
+        # Montant valide trouvé ET raisonnable
+        if amount is not None and abs(amount) > 0.01:
+            # Corriger débits mal signés (PAIEMENT/CB = négatif)
+            if amount > 0 and any(x in up for x in ["PAIEMENT", "PRLV", "PRELEVEMENT", "FACT", "CB"]):
                 amount = -abs(amount)
 
             transactions.append({
@@ -160,16 +183,17 @@ def parse_cic(pdfpath):
                 "type": "DEBIT" if amount < 0 else "CREDIT",
                 "amount": amount,
                 "name": (label or f"Transaction {len(transactions) + 1}")[:64],
-                "memo": memo[:128] if memo else Path(pdfpath).stem,
+                "memo": Path(pdfpath).stem,
                 "fitid": make_fitid(date_op.replace("/", ""), label or "", amount),
             })
 
         i += 1
 
+    # Déduplication par date + montant (évite doublons)
     seen = set()
     uniq = []
     for t in transactions:
-        key = (t["date"], t["name"], round(t["amount"], 2))
+        key = (t["date"], round(t["amount"], 2))
         if key not in seen:
             seen.add(key)
             uniq.append(t)
@@ -181,6 +205,7 @@ def parse_cic(pdfpath):
         "balance_close": sum(t["amount"] for t in uniq),
     }
     return info, uniq
+
 
 def convertpdf(pdfpath, outputpath=None, target="quadra"):
     p = Path(pdfpath)
